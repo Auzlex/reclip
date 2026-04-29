@@ -3,8 +3,12 @@ downloads/
 __pycache__/
 *.pyc
 assets/*.mov
+assets/*.mp4
+assets/*.mkv
+assets/*.webm
 .DS_Store
 .env
 .env.local
 .env.production
 .env.development
+.vscode/

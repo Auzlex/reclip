@@ -354,6 +354,22 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
+    /* Progress bar (PR #13) */
+    .progress-bar-wrap {
+      width: 100%;
+      height: 6px;
+      background: var(--card-border);
+      border-radius: 3px;
+      overflow: hidden;
+      margin-top: 6px;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      background: var(--accent);
+      border-radius: 3px;
+      transition: width 0.3s ease;
+    }
+
     .footer {
       margin-top: 48px;
       text-align: center;
@@ -387,15 +403,15 @@
       <p>Free media downloader</p>
     </div>
 
-    <textarea id="urls" placeholder="Paste one or more URLs..." rows="2"></textarea>
+    <textarea id="urls" placeholder="Paste one or more URLs..." rows="2" aria-label="Paste URLs to download"></textarea>
     <p class="hint">Multiple links? Separate with spaces, commas, or newlines.</p>
 
     <div class="controls">
-      <div class="pill-group">
-        <button class="pill active" data-format="video" onclick="setFormat(this)">MP4</button>
-        <button class="pill" data-format="audio" onclick="setFormat(this)">MP3</button>
+      <div class="pill-group" role="group" aria-label="Format selection">
+        <button class="pill active" data-format="video" onclick="setFormat(this)" aria-label="Download as MP4 video">MP4</button>
+        <button class="pill" data-format="audio" onclick="setFormat(this)" aria-label="Download as MP3 audio">MP3</button>
       </div>
-      <button class="fetch-btn" id="goBtn" onclick="go()">Fetch</button>
+      <button class="fetch-btn" id="goBtn" onclick="go()" aria-label="Fetch video information">Fetch</button>
     </div>
 
     <div id="cards" class="cards"></div>
@@ -566,14 +582,20 @@
 
       let actionHtml = '';
       if (c.status === 'ready') {
-        actionHtml = `<button class="card-dl-btn" onclick="dlCard(${idx})">Download</button>${qualityChips}`;
+        actionHtml = `<button class="card-dl-btn" onclick="dlCard(${idx})" aria-label="Download ${esc(c.title || 'media')}">Download</button>${qualityChips}`;
       } else if (c.status === 'downloading') {
-        actionHtml = `<span class="card-status downloading"><span class="spin"></span> Downloading...</span>`;
+        const pct = c.progress != null ? Math.round(c.progress) : null;
+        const pctText = pct != null ? ` ${pct}%` : '...';
+        actionHtml = `<span class="card-status downloading"><span class="spin"></span> Downloading${pctText}</span>`;
+        if (pct != null) {
+          actionHtml += `<div class="progress-bar-wrap"><div class="progress-bar-fill" style="width:${pct}%"></div></div>`;
+        }
       } else if (c.status === 'done') {
-        actionHtml = `<button class="card-dl-btn done" onclick="saveCard(${idx})">Save</button>
-          <span class="card-status done">${esc(c.filename || '')}</span>`;
+        const sizeInfo = c.fileSizeMb ? ` (${c.fileSizeMb} MB)` : '';
+        actionHtml = `<button class="card-dl-btn done" onclick="saveCard(${idx})" aria-label="Save ${esc(c.filename || 'file')}">Save</button>
+          <span class="card-status done">${esc(c.filename || '')}${sizeInfo}</span>`;
       } else if (c.status === 'error') {
-        actionHtml = `<button class="card-dl-btn" onclick="dlCard(${idx})">Retry</button>
+        actionHtml = `<button class="card-dl-btn" onclick="dlCard(${idx})" aria-label="Retry download">Retry</button>
           <span class="card-status error">${esc(friendlyError(c.error || 'Download failed'))}</span>`;
       }
 
@@ -594,7 +616,7 @@
       const bar = document.createElement('div');
       bar.id = 'dl-all-bar';
       bar.className = 'dl-all-bar';
-      bar.innerHTML = `<button class="dl-all-btn" onclick="dlAll()">Download All</button>`;
+      bar.innerHTML = `<button class="dl-all-btn" onclick="dlAll()" aria-label="Download all fetched media">Download All</button>`;
       document.getElementById('cards').appendChild(bar);
     }
 
@@ -603,62 +625,77 @@
       renderCard(idx);
     }
 
-    async function dlCard(idx) {
+    function dlCard(idx) {
       const c = cardData[idx];
       c.status = 'downloading';
       c.error = null;
+      c.progress = null;
       renderCard(idx);
 
-      try {
-        const res = await fetch('/api/download', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            url: c.url,
-            format: currentFormat,
-            format_id: c.selectedFormatId,
-            title: c.title || '',
-          }),
-        });
-        const data = await res.json();
-        if (data.error) {
+      return new Promise(async (resolve) => {
+        try {
+          const res = await fetch('/api/download', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              url: c.url,
+              format: currentFormat,
+              format_id: c.selectedFormatId,
+              title: c.title || '',
+            }),
+          });
+          const data = await res.json();
+          if (data.error) {
+            c.status = 'error';
+            c.error = data.error;
+            renderCard(idx);
+            resolve();
+            return;
+          }
+          c.jobId = data.job_id;
+          pollCard(idx, resolve);
+        } catch (err) {
           c.status = 'error';
-          c.error = data.error;
+          c.error = err.message;
           renderCard(idx);
-          return;
+          resolve();
         }
-        c.jobId = data.job_id;
-        pollCard(idx);
-      } catch (err) {
-        c.status = 'error';
-        c.error = err.message;
-        renderCard(idx);
-      }
+      });
     }
 
-    function pollCard(idx) {
+    function pollCard(idx, onComplete) {
       const c = cardData[idx];
       const iv = setInterval(async () => {
         try {
           const res = await fetch(`/api/status/${c.jobId}`);
           const data = await res.json();
+          // Update progress (PR #13)
+          if (data.progress != null) {
+            c.progress = data.progress;
+            renderCard(idx);
+          }
           if (data.status === 'done') {
             clearInterval(iv);
             c.status = 'done';
             c.filename = data.filename;
+            c.fileSizeMb = data.file_size_mb;
+            c.progress = 100;
             renderCard(idx);
             saveCard(idx);
+            if (onComplete) onComplete();
           } else if (data.status === 'error') {
             clearInterval(iv);
             c.status = 'error';
             c.error = data.error;
             renderCard(idx);
+            if (onComplete) onComplete();
           }
         } catch {
           clearInterval(iv);
           c.status = 'error';
           c.error = 'Lost connection to server';
           renderCard(idx);
+          if (onComplete) onComplete();
         }
       }, 1000);
     }
@@ -670,12 +707,17 @@
       a.href = `/api/file/${c.jobId}`;
       a.download = c.filename || '';
       a.click();
+      // Clean up server-side file after a short delay (PR #3)
+      setTimeout(() => {
+        fetch(`/api/cleanup/${c.jobId}`, { method: 'POST' }).catch(() => {});
+      }, 5000);
     }
 
     async function dlAll() {
       const btn = document.querySelector('.dl-all-btn');
       if (btn) { btn.disabled = true; btn.textContent = 'Downloading...'; }
 
+      // Download sequentially, awaiting each to complete via Promise-based polling (PR #3)
       for (let i = 0; i < cardData.length; i++) {
         if (cardData[i].status === 'ready') {
           await dlCard(i);
